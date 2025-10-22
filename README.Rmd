@@ -1,0 +1,226 @@
+---
+title: "Joint mixed-effects models to account for unmeasured contextual confounding"
+author: "Vanessa McNealis"
+date: "2025-10-15"
+output: pdf_document
+---
+
+Load dependencies and source script
+
+```{r dependencies, message = FALSE, warning = FALSE}
+library(boot)
+library(tidyverse)
+library(igraph)
+library(data.table)
+library(pbapply)
+library(lme4)
+library(MASS)
+library(statnet)
+library(intergraph)
+library(statmod)
+library(fastGHQuad)
+library(geex)
+library(parallel)
+library(here)
+library(numDeriv)
+library(rjags)
+library(ggplot2)
+library(dplyr)
+# New package
+library(Matrix)
+library(mvtnorm)
+source(url("https://github.com/vanessamcnealis/Joint-Mixed-Effects-Models-Network-Interference/blob/main/Functions.R?raw=TRUE"))
+```
+
+## Data preparation
+
+The data at hand \texttt{dat} consists of one simulated dataset used for the simulation
+studies presented in the paper entitled "Joint mixed-effects models for causal inference in clustered network-based observational studies". The data generating scheme for the assigned treatment $Z$, the outcome $Y$, and the covariates $X_1$, $X_2$ and $X_3$ is described in the
+manuscript. Note that a SAR structure with $\tau=0.1$ was used to generate the random errors in the outcome model. 
+
+```{r prep}
+load(url("https://github.com/vanessamcnealis/Joint-Mixed-Effects-Models-Network-Interference/blob/main/sim_data.RData?raw=TRUE"))
+load(url("https://github.com/vanessamcnealis/Joint-Mixed-Effects-Models-Network-Interference/blob/main/network.RData?raw=TRUE"))
+```
+
+### Network visualization
+
+```{r plot, message = FALSE, warning = FALSE}
+
+V(network)$component.id <- sim_data$component.id
+subg <- subgraph(network, v=V(network)[V(network)$component.id %in% c(1, 4, 5, 10, 15, 25)])
+plot(subg, vertex.size=3, vertex.label=NA, vertex.color="cadetblue3", 
+     vertex.frame.color="cadetblue3")
+```
+
+### Prepare the data for modeling
+
+```{r covariates}
+# Total number of nodes
+N <- nrow(sim_data)
+
+#Number of disjoint subgraphs
+m <- length(unique(sim_data$component.id))
+
+# Adjacency matrix associated with the graph
+A <- as.matrix(as_adjacency_matrix(network))
+
+# Create a variable indicating the degree of a node
+sim_data$degree <- as.numeric(A %*% rep(1, N))
+
+# Create a variable indicating the number of treated neighbours for each node
+sim_data$k_treated <- 
+    as.numeric(A %*% matrix(sim_data$Z, ncol = 1, nrow = nrow(sim_data)))
+
+# Create a variable indicated the proportion of treated neighbours for each node
+sim_data$prop_treated <- ifelse(sim_data$degree == 0, 0, sim_data$k_treated/sim_data$degree)
+
+# Change this vector for different alpha values
+alpha.vec <- alpha.vec <- seq(0.1, 0.9, by=0.1)
+
+```
+
+## Modeling
+
+In this section, we will perform posterior inference for the 
+average potential outcomes and associated causal contrasts under
+the proposed joint mixed effects model (JMM). The average potential 
+outcome for a unit depends on an individual exposure/treatment $z$ and 
+treatment coverage $\alpha \in (0,1)$, where the treatment coverage represents the 
+counterfactual probability that first-order neighbours receive the 
+exposure/treatment. For each treatment coverage $\alpha$ value, the R program will output the \textbf{posterior means, posterior variances, and 95\% credible intervals for average potential
+outcomes $\mu_{0\alpha}, \mu_{1\alpha}, \mu_{\alpha}$}. Also, the R program will output the these quantities for different causal contrasts of interest, presented in the main paper. 
+
+Equations for calculating the four causal effect estimates are:
+\begin{itemize}
+\item $\hat{DE}(\alpha) =  \hat{\mu}_{1\alpha} - \hat{\mu}_{0\alpha}$
+\item $\hat{IE}(\alpha_0, \alpha_1) =  \hat{\mu}_{0\alpha_1} - \hat{\mu}_{0\alpha_0}$
+\item $\hat{TE}(\alpha_0, \alpha_1) =  \hat{\mu}_{1\alpha_1} - \hat{\mu}_{0\alpha_0}$
+\item $\hat{OE}(\alpha_0, \alpha_1) =  \hat{\mu}_{\alpha_1} - \hat{\mu}_{\alpha_0},$
+\end{itemize}
+where $\alpha_0$ and $\alpha_1$ represent distinct treatment coverages with 
+$\alpha_0 \neq \alpha_1$. 
+
+We first specify the models for the outcome and treatment propensity (note that
+these correspond to the oracle models). In the model for the treatment propensity,
+we include a random effect term for the subgraph. Note that these models are fitted \textbf{jointly} in the MCMC procedure, with a SAR prior for the model errors to account for residual network autocorrelation. Please refer to the paper for details.
+
+```{r formulas}
+
+outcome_formula <- Y ~ Z + prop_treated + prop_treated*Z + abs(X1) + X2 + abs(X1)*X2 + (1|component.id)
+propensity_formula <- Z ~ abs(X1) + I(X2*abs(X1)) + X3 + (1|component.id)
+
+```
+
+
+### Joint mixed-effects model (JMM) estimates
+
+Here, we fit the JMM to the simulated data using MCMC with weakly informative
+priors described in the paper. The procedure is implemented in \texttt{rjags}. Posterior inference is performed using four independent chains of 30,000 samples after a burn-in period of 10,000 iterations and with a thinning parameter of 50. 
+
+
+```{r jmm}
+
+# Uncomment these lines to run the fitting procedure (which might take a 
+# substantial amount of time)
+
+#jmm_estimates <- jmm_fit(data=sim_data,
+#                                outcome_formula = outcome_formula,
+#                                propensity_formula = propensity_formula, 
+#                                A=A,
+#                                alpha.vec = alpha.vec)
+
+load(url("https://github.com/vanessamcnealis/Joint-Mixed-Effects-Models-Network-Interference/blob/main/jmm_estimates.RData?raw=TRUE"))
+jmm_estimates
+
+```
+
+The object above is a list containing the following components:
+
+\begin{itemize}
+\item \texttt{mu.0.hat} is the vector of posterior means for $\mu_{0\alpha}$ for 
+values of $\alpha$ contained in \texttt{alpha.vec};
+\item \texttt{mu.1.hat} is the vector of posterior means for $\mu_{1\alpha}$;
+\item \texttt{mu.hat} is the vector of posterior means for $\mu_{\alpha} = \alpha \mu_{1\alpha} + (1-\alpha) \mu_{0\alpha}$;
+\item \texttt{DE.hat} is the vector of posterior means for $DE({\alpha})$;
+\item \texttt{IE.hat}, \texttt{OE.hat}, and \texttt{TE.hat} are the matrices
+of posterior means for $IE({\alpha_0}, \alpha_1)$, $OE({\alpha_0}, \alpha_1)$,
+and $TE({\alpha_0}, \alpha_1)$, respectively;
+\item \texttt{var.mu.0} is the vector of posterior variances for $\mu_{0\alpha}$ for values of $\alpha$ contained in \texttt{alpha.vec};
+\item \texttt{var.mu.1} is the vector of posterior variances for $\mu_{1\alpha}$;
+\item \texttt{var.mu} is the vector of posterior variances for $\mu_{\alpha}$;
+\item \texttt{var.DE} is the vector of posterior variances for $DE({\alpha})$;
+\item \texttt{var.IE}, \texttt{var.OE}, and \texttt{var.TE} are the matrices
+of posterior variances for $IE({\alpha_0}, \alpha_1)$, $OE({\alpha_0}, \alpha_1)$,
+and $TE({\alpha_0}, \alpha_1)$, respectively;
+\item \texttt{CrI.mu.0} is a matrix containing 95\% credible intervals for $\mu_{0\alpha}$, with the first row containing the lower bounds and the second row containing the upper bounds, for values of $\alpha$ contained in \texttt{alpha.vec};
+\item \texttt{CrI.mu.1} is a matrix containing 95\% credible intervals for $\mu_{1\alpha}$;
+\item \texttt{CrI.mu} is a matrix containing 95\% credible intervals for $\mu_{\alpha}$;
+\item \texttt{CrI.DE} is a matrix containing 95\% credible intervals for $DE({\alpha})$;
+\item \texttt{CrI.IE.lb}, \texttt{CrI.OE.lb}, and \texttt{CrI.TE.lb} are the matrices
+containing the lower bounds of 95\% credible intervals for $IE({\alpha_0}, \alpha_1)$, $OE({\alpha_0}, \alpha_1)$,
+and $TE({\alpha_0}, \alpha_1)$, respectively;
+\item \texttt{CrI.IE.ub}, \texttt{CrI.OE.ub}, and \texttt{CrI.TE.ub} are the matrices
+containing the upper bounds of 95\% credible intervals for $IE({\alpha_0}, \alpha_1)$, $OE({\alpha_0}, \alpha_1)$,
+and $TE({\alpha_0}, \alpha_1)$, respectively.
+\end{itemize}
+
+
+We can plot the estimated direct $DE(\alpha)$, indirect $IE(\alpha, 0.3)$, overall $OE(\alpha, 0.3)$, and total $TE(\alpha,0.3)$ effects as follows.
+
+```{r effects}
+
+estimates <- c(jmm_estimates$DE.hat,
+               jmm_estimates$IE.hat[,3],
+               jmm_estimates$OE.hat[,3],
+               jmm_estimates$TE.hat[,3])
+
+lower <- c(jmm_estimates$CrI.DE[1,],
+               jmm_estimates$CrI.IE.lb[,3],
+               jmm_estimates$CrI.OE.lb[,3],
+               jmm_estimates$CrI.TE.lb[,3])
+
+upper <- c(jmm_estimates$CrI.DE[2,],
+               jmm_estimates$CrI.IE.ub[,3],
+               jmm_estimates$CrI.OE.ub[,3],
+               jmm_estimates$CrI.TE.ub[,3])
+
+df <- data.frame(
+  alpha = alpha.vec,
+  estimate = estimates,    
+  lower = lower,           
+  upper = upper,           
+  type = rep(c("DE(alpha)", "IE(alpha,0.3)", "OE(alpha,0.3)", "TE(alpha,0.3)"), each = length(alpha.vec))
+)
+
+facet_labels <- c(
+  "DE(alpha)"  = expression(DE(alpha)),
+  "IE(alpha,0.3)" = expression(IE(alpha, 0.3)),
+  "TE(alpha,0.3)" = expression(TE(alpha, 0.3)),
+  "OE(alpha,0.3)" = expression(OE(alpha, 0.3))
+)
+
+
+# Plot
+ggplot(df, aes(x = alpha, y = estimate)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.5) +
+  facet_wrap(~ type, ncol = 2, scales = "free_y") +
+  labs(
+    x = expression("Treatment coverage " * alpha),
+    y = "Estimate"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "top",
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 12),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 13, face = "bold"),
+    panel.spacing = unit(1, "lines")
+  )
+
+```
+
+
+
